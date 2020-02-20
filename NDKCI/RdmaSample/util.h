@@ -58,6 +58,7 @@ Abstract:
     MULTI_LINE_MACRO_BEGIN                              \
         if (!NT_SUCCESS(status))                        \
         {                                               \
+            __debugbreak();                             \
             goto exit;                                  \
         }                                               \
     MULTI_LINE_MACRO_END

@@ -28,16 +28,16 @@ Abstract:
 // Hard coded IfIndex of the RNIC to use for the client and listener
 // TODO: Change these values to ones specific to your system
 //
-#define CLIENT_IF_INDEX         12
-#define LISTEN_IF_INDEX         15
+#define CLIENT_IF_INDEX         6       // BasicNic
+#define LISTEN_IF_INDEX         10      // ConnectX-5
 
 // Hard coded IP address for the client and listener
-#define CLIENT_ADDRESS          L"10.0.0.1"
-#define LISTEN_ADDRESS          L"10.0.0.2:54321"
+#define CLIENT_ADDRESS          L"192.168.1.101"
+#define LISTEN_ADDRESS          L"192.168.1.102:43981"
 
 // Hard code the amount of data is sent between them
 #define SEND_DATA_LEN           (8 * 1024)  // 8K
-#define LISTEN_DATA_LEN         (64 * 1024) // 64K
+#define LISTEN_DATA_LEN         (3 * 1024) // 3K
 
 DRIVER_OBJECT *RdmaDriverObject = NULL;
 
@@ -74,9 +74,9 @@ DriverEntry(
     LONG ret;
     ULONG i;
 
-    MDL *ClientMdl = NULL, *ListenMdl = NULL;
-    UCHAR *ClientBuffer = NULL, *ListenBuffer = NULL;
-    RDMA_REGISTERED_BUFFER *RdmaListenBuffer = NULL;
+    MDL *RdmaSourceBufferMdl = NULL, *ListenMdl = NULL;
+    UCHAR *RdmaSourceBuffer = NULL, *ListenBuffer = NULL;
+    RDMA_REGISTERED_BUFFER *RdmaSinkBuffer = NULL;
 
     UNREFERENCED_PARAMETER(RegistryPath);
     RdmaDriverObject = DriverObject;
@@ -159,20 +159,20 @@ DriverEntry(
     //
     // Allocate some data to send
     //
-    ClientBuffer = RdmaAllocateNpp(SEND_DATA_LEN);
-    VERIFY_MALLOC(ClientBuffer);
+    RdmaSourceBuffer = RdmaAllocateNpp(SEND_DATA_LEN);
+    VERIFY_MALLOC(RdmaSourceBuffer);
 
-    ClientMdl = IoAllocateMdl(ClientBuffer, SEND_DATA_LEN, FALSE, FALSE, NULL);
-    VERIFY_MALLOC(ClientMdl);
+    RdmaSourceBufferMdl = IoAllocateMdl(RdmaSourceBuffer, SEND_DATA_LEN, FALSE, FALSE, NULL);
+    VERIFY_MALLOC(RdmaSourceBufferMdl);
 
-    MmBuildMdlForNonPagedPool(ClientMdl);
+    MmBuildMdlForNonPagedPool(RdmaSourceBufferMdl);
 
     //
     // Fill data buffer with recognizable pattern
     //
     for (i = 0; i < SEND_DATA_LEN; i++)
     {
-        ClientBuffer[i] = (UCHAR)(i % 256);
+        RdmaSourceBuffer[i] = (UCHAR)(i % 256);
     }
 
     //
@@ -180,7 +180,7 @@ DriverEntry(
     //
     status = RdmaSend(
         ClientSocket.RdmaSocket,
-        ClientMdl,
+        RdmaSourceBufferMdl,
         SEND_DATA_LEN,
         FALSE,
         0,
@@ -194,11 +194,11 @@ DriverEntry(
 
     VERIFY_NTSUCCESS(status);
 
-    IoFreeMdl(ClientMdl);
-    RdmaFreeNpp(ClientBuffer);
+    IoFreeMdl(RdmaSourceBufferMdl);
+    RdmaFreeNpp(RdmaSourceBuffer);
 
-    ClientMdl = NULL;
-    ClientBuffer = NULL;
+    RdmaSourceBufferMdl = NULL;
+    RdmaSourceBuffer = NULL;
 
     //
     // Allocate some data to register as a buffer
@@ -222,30 +222,30 @@ DriverEntry(
     //
     // Register the buffer so the client can RDMA read/write to it
     //
-    status = RdmaRegisterBuffer(ServerSocket.RdmaSocket, ListenMdl, LISTEN_DATA_LEN, &RdmaListenBuffer);
+    status = RdmaRegisterBuffer(ClientSocket.RdmaSocket, ListenMdl, LISTEN_DATA_LEN, &RdmaSinkBuffer);
     VERIFY_NTSUCCESS(status);
 
     //
     // Allocate enough space so we can RDMA read the server's buffer
     //
-    ClientBuffer = RdmaAllocateNpp(LISTEN_DATA_LEN);
-    VERIFY_MALLOC(ClientBuffer);
+    RdmaSourceBuffer = RdmaAllocateNpp(LISTEN_DATA_LEN);
+    VERIFY_MALLOC(RdmaSourceBuffer);
 
-    ClientMdl = IoAllocateMdl(ClientBuffer, LISTEN_DATA_LEN, FALSE, FALSE, NULL);
-    VERIFY_MALLOC(ClientMdl);
+    RdmaSourceBufferMdl = IoAllocateMdl(RdmaSourceBuffer, LISTEN_DATA_LEN, FALSE, FALSE, NULL);
+    VERIFY_MALLOC(RdmaSourceBufferMdl);
 
-    MmBuildMdlForNonPagedPool(ClientMdl);
+    MmBuildMdlForNonPagedPool(RdmaSourceBufferMdl);
 
     //
     // RDMA read from the server's buffer into our client buffer
     //
     KeClearEvent(&ctx.CompletionEvent);
     status = RdmaRead(
-        ClientSocket.RdmaSocket,
-        ClientMdl,
+        ServerSocket.RdmaSocket,
+        RdmaSourceBufferMdl,
         LISTEN_DATA_LEN,
-        (UINT64) RdmaListenBuffer->BaseVirtualAddress,
-        RdmaListenBuffer->RemoteToken,
+        (UINT64) RdmaSinkBuffer->BaseVirtualAddress,
+        RdmaSinkBuffer->RemoteToken,
         &ctx,
         CompletionCallback);
     if (status == STATUS_PENDING)
@@ -259,14 +259,14 @@ DriverEntry(
     //
     // Check that the pattern matches
     //
-    NT_ASSERT(RtlCompareMemory(ClientBuffer, ListenBuffer, LISTEN_DATA_LEN));
+    NT_ASSERT(RtlCompareMemory(RdmaSourceBuffer, ListenBuffer, LISTEN_DATA_LEN));
 
     //
     // Fill our client buffer with a different pattern
     //
     for (i = 0; i < LISTEN_DATA_LEN; i++)
     {
-        ClientBuffer[i] = (i + 2) % 256;
+        RdmaSourceBuffer[i] = (i + 2) % 256;
     }
 
     //
@@ -274,11 +274,11 @@ DriverEntry(
     //
     KeClearEvent(&ctx.CompletionEvent);
     status = RdmaWrite(
-        ClientSocket.RdmaSocket,
-        ClientMdl,
+        ServerSocket.RdmaSocket,
+        RdmaSourceBufferMdl,
         LISTEN_DATA_LEN,
-        (UINT64) RdmaListenBuffer->BaseVirtualAddress,
-        RdmaListenBuffer->RemoteToken,
+        (UINT64) RdmaSinkBuffer->BaseVirtualAddress,
+        RdmaSinkBuffer->RemoteToken,
         &ctx,
         CompletionCallback);
     if (status == STATUS_PENDING)
@@ -292,12 +292,12 @@ DriverEntry(
     //
     // Check that the pattern matches
     //
-    NT_ASSERT(RtlCompareMemory(ClientBuffer, ListenBuffer, LISTEN_DATA_LEN));
+    NT_ASSERT(RtlCompareMemory(RdmaSourceBuffer, ListenBuffer, LISTEN_DATA_LEN));
 
 exit:
-    if (RdmaListenBuffer)
+    if (RdmaSinkBuffer)
     {
-        RdmaInvalidateRegisteredBuffer(ServerSocket.RdmaSocket, RdmaListenBuffer);
+        RdmaInvalidateRegisteredBuffer(ClientSocket.RdmaSocket, RdmaSinkBuffer);
     }
 
     if (ListenBuffer)
@@ -310,14 +310,14 @@ exit:
         IoFreeMdl(ListenMdl);
     }
 
-    if (ClientBuffer)
+    if (RdmaSourceBuffer)
     {
-        RdmaFreeNpp(ClientBuffer);
+        RdmaFreeNpp(RdmaSourceBuffer);
     }
 
-    if (ClientMdl)
+    if (RdmaSourceBufferMdl)
     {
-        IoFreeMdl(ClientMdl);
+        IoFreeMdl(RdmaSourceBufferMdl);
     }
 
     if (!NT_SUCCESS(status))
